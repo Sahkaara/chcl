@@ -69,7 +69,51 @@ static void usage(void) {
         if (!strcmp(cmd, "to-json")) {
             if (argc < 3) { usage(); return 1; }
 
-            
+            chcl_document_t *d = chcl_parse_file(argv[2]);
+            if (!d) {
+                fprintf(stderr, "error: cannot read %s\n", argv[2]);
+                return 1;
+            }
+            if (chcl_document_error(d)) {
+                fprintf(stderr, "%s:%d:%d: error: %s\n",
+                        argv[2],
+                        chcl_document_error_line(d),
+                        chcl_document_error_column(d),
+                        chcl_document_error(d));
+                chcl_free_document(d);
+                return 2;
+            }
+
+            char *json = chcl_to_json(d);
+            if (json) { puts(json); free(json); }
+            chcl_free_document(d);
+            return 0;
         }
+
+        /* --- lint ----------------------------------------------- */
+        if (!strcmp(cmd, "lint")) {
+            if (argc < 3) { usage(); return 1; }
+
+            chcl_document_t *d = chcl_parse_file(argv[2]);
+            if (!d) {
+                fprintf(stderr, "error: cannot read %s\n", argv[2]);
+                return 1;
+            }
+
+            int rc = 0;
+            if (chcl_document_error(d)) {
+                fprintf(stderr, "%s:%d:%d: error: %s\n",
+                        argv[2],
+                    chcl_document_error_line(d),
+                    chcl_document_error_column(d),
+                    chcl_document_error(d));
+            rc = 2;
+            }
+            chcl_free__document(d);
+            return rc;
+        }
+
+        usage();
+        return 1;
 }
 
