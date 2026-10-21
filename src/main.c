@@ -21,7 +21,7 @@ static void usage(void) {
         "chcl / HCL toolkit in C (formatter, linter, JSON)\n"
         "\n"
         "Usage:\n"
-        "   chcl fmt [/w] <file.hcl>    Format (stdout, or in-place with -w)\n"
+        "   chcl fmt [-w] [--check] <file.hcl>  Format (or check) the file\n"
         "   chcl to-json <file.hcl>     Convert to JSON\n"
         "   chcl lint <file.hcl>        Validate the syntax\n"
         "   chcl --help                 Show this help\n"
@@ -37,23 +37,42 @@ static void usage(void) {
         if (!strcmp(cmd, "--help") || !strcmp(cmd, "-h")) { usage(); return 0; }
         if (!strcmp(cmd, "--version")) { puts("chcl 0.1.0"); return 0; }
 
-        /* --- fmt -------------------------------------------------- */
+        /* --- fmt ---------------------------------------------------- *
+        * Supports: `-w` (write in place), `--check` (CI mode).        */
         if (!strcmp(cmd, "fmt")) {
-            int inplace = 0, idx = 2;
-            if (argc > 2 && !strcmp(argv[2], "-w")) { inplace = 1; idx = 3; }
-            if (argc <= idx) { usage(); return 1; }
+            int inplace = 0, check = 0, argi = 2;
 
-            char *out = chcl_format_file(argv[idx]);
-            if (!out) {
-                fprintf(stderr, "error: cannot read %s\n", argv[idx]);
-                return 1;
+            /* Parse leading flags in any order. */
+            for (; argi < argc && argv[argi][0] == '-'; argi++) {
+                if      (!strcmp(argv[argi], "-w"))      inplace = 1;
+                else if (!strcmp(argv[argi], "--check")) check   = 1;
+                else { usage(); return 1; }
+            }
+            if (argi >= argc) { usage(); return 1; }
+            const char *file = argv[argi];
+
+            /* --check: exit 1 and print the filename if reformatting needed. */
+            if (check) {
+                int same = chcl_format_is_canonical(file);
+                if (same < 0) {
+                    fprintf(stderr, "error: cannot read %s\n", file);
+                    return 1;
+                }
+                if (!same) { puts(file); return 1; }
+                return 0;
             }
 
+            /* Normal fmt: stdout, or -w to overwrite the file. */
+            char *out = chcl_format_file(file);
+            if (!out) {
+                fprintf(stderr, "error: cannot read %s\n", file);
+                return 1;
+            }
             if (inplace) {
-                FILE *f = fopen(argv[idx], "wb");
+                FILE *f = fopen(file, "wb");
                 if (!f) {
                     free(out);
-                    fprintf(stderr, "error: cannot write %s\n", argv[idx]);
+                    fprintf(stderr, "error: cannot write %s\n", file);
                     return 1;
                 }
                 fputs(out, f);
@@ -62,31 +81,6 @@ static void usage(void) {
                 fputs(out, stdout);
             }
             free(out);
-            return 0;
-        }
-
-        /* --- to-json ---------------------------------------------- */
-        if (!strcmp(cmd, "to-json")) {
-            if (argc < 3) { usage(); return 1; }
-
-            chcl_document_t *d = chcl_parse_file(argv[2]);
-            if (!d) {
-                fprintf(stderr, "error: cannot read %s\n", argv[2]);
-                return 1;
-            }
-            if (chcl_document_error(d)) {
-                fprintf(stderr, "%s:%d:%d: error: %s\n",
-                        argv[2],
-                        chcl_document_error_line(d),
-                        chcl_document_error_column(d),
-                        chcl_document_error(d));
-                chcl_free_document(d);
-                return 2;
-            }
-
-            char *json = chcl_to_json(d);
-            if (json) { puts(json); free(json); }
-            chcl_free_document(d);
             return 0;
         }
 
@@ -109,7 +103,7 @@ static void usage(void) {
                     chcl_document_error(d));
             rc = 2;
             }
-            chcl_free__document(d);
+            chcl_free_document(d);
             return rc;
         }
 

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /*
  * chcl.c - Implementation of the chcl HCL toolkit.
  *
@@ -302,15 +304,6 @@ static void advance(parser_t *p) {
     else p->cur = lexer_next(&p->lex);
 }
 
-/* Peek at the next token without consuming it. */
-static token_t peek(parser_t *p) {
-    if (!p->has_peek) {
-        p->peeked = lexer_next(&p->lex);
-        p->has_peek = 1;
-    }
-    return p->peeked;
-}
-
 /* Record the first error encountered; subsequent calls are no-ops. */
 static void set_error(parser_t *p, const char *fmt, ...) {
     if (p->doc->error) return;
@@ -333,7 +326,7 @@ static node_t *alloc_node(parser_t *p, node_type_t t) {
 }
 
 /* Extract the txtual content of a token,unquoting string tokens. */
-static char *token_next(arena_t *a, token_t tok) {
+static char *token_text(arena_t *a, token_t tok) {
     if (tok.type == TOKEN_STRING && tok.len >= 2)
         return arena_strdup(a, tok.start + 1, tok.len -2);
             return arena_strdup(a, tok.start, tok.len);
@@ -443,6 +436,15 @@ static node_t *parse_expr(parser_t *p) {
         }
         case TOKEN_NULL: {
             node_t *n = alloc_node(p, NODE_NULL);
+            advance(p);
+            return n;
+        }
+        /* NEW: bare identifiers as values (e.g. `type = string`).
+         * In real HCL this is a variable/type reference; our subset
+         * simplifies by materializing it as a string node. */
+        case TOKEN_IDENT: {
+            node_t *n = alloc_node(p, NODE_STRING);
+            if (n) n->s = token_text(&p->doc->arena, p->cur);
             advance(p);
             return n;
         }
@@ -586,6 +588,108 @@ static void emit_indent(sbuf_t *sb, int depth) {
     for (int i = 0; i < depth; i++) sb_puts(sb, "  ");
 }
 
+/*
+ * Post-process the formatter's output so that within each block body,
+ * consecutive `key = value` lines at the same indentation are aligned
+ * on the `=` column, mimicking `terraform fmt`.
+ *
+ * Works on the already-formatted output (line-based, not token-based),
+ * which keeps the change isolated and easy to reason about.
+ */
+static char *align_equals(const char *input) {
+    size_t len = strlen(input);
+
+    /* Per-line metadata collected in a first pass. */
+    typedef struct {
+        size_t start, end;  /* line content [start, end), indentation excluded */
+        int    indent;      /* number of leading spaces */
+        size_t key_end;     /* offset in input where the key ends */
+        int    is_attr;     /* 1 if the line matches `key = value` */
+    } line_t;
+
+    size_t cap = 128, n = 0;
+    line_t *lines = malloc(cap * sizeof(*lines));
+    if (!lines) return NULL;
+
+    /* First pass: split into lines and flag attribute lines. */
+    for (size_t i = 0; i < len; ) {
+        size_t s = i;
+        while (i < len && input[i] != '\n') i++;
+        size_t e = i;
+        if (i < len) i++;                       /* skip '\n' */
+        if (e > s && input[e - 1] == '\r') e--; /* strip CRLF */
+
+        int indent = 0;
+        while (s < e && input[s] == ' ') { indent++; s++; }
+
+        int is_attr = 0;
+        size_t key_end = s;
+        if (s < e && (isalpha((unsigned char)input[s]) || input[s] == '_')) {
+            size_t k = s;
+            while (k < e && (isalnum((unsigned char)input[k]) ||
+                             input[k] == '_' || input[k] == '-')) k++;
+            size_t k2 = k;
+            while (k2 < e && input[k2] == ' ') k2++;
+            if (k2 < e && input[k2] == '=') {
+                size_t k3 = k2 + 1;
+                while (k3 < e && input[k3] == ' ') k3++;
+                if (k3 < e && input[k3] != '#') {
+                    is_attr = 1;
+                    key_end = k;
+                }
+            }
+        }
+
+        if (n == cap) {
+            cap *= 2;
+            line_t *tmp = realloc(lines, cap * sizeof(*lines));
+            if (!tmp) { free(lines); return NULL; }
+            lines = tmp;
+        }
+        lines[n++] = (line_t){ .start = s, .end = e, .indent = indent,
+                               .key_end = key_end, .is_attr = is_attr };
+    }
+
+    /* Second pass: emit, aligning within runs of attribute lines. */
+    sbuf_t out = {0};
+    for (size_t i = 0; i < n; ) {
+        if (!lines[i].is_attr) {
+            for (int x = 0; x < lines[i].indent; x++) sb_putc(&out, ' ');
+            sb_write(&out, input + lines[i].start, lines[i].end - lines[i].start);
+            sb_putc(&out, '\n');
+            i++;
+            continue;
+        }
+        /* Find the contiguous run at the same indentation level. */
+        size_t j = i, max_key = 0;
+        while (j < n && lines[j].is_attr && lines[j].indent == lines[i].indent) {
+            size_t kl = lines[j].key_end - lines[j].start;
+            if (kl > max_key) max_key = kl;
+            j++;
+        }
+        /* Emit the run with keys padded to max_key. */
+        for (size_t k = i; k < j; k++) {
+            for (int x = 0; x < lines[k].indent; x++) sb_putc(&out, ' ');
+            size_t kl = lines[k].key_end - lines[k].start;
+            sb_write(&out, input + lines[k].start, kl);
+            for (size_t x = kl; x < max_key; x++) sb_putc(&out, ' ');
+            sb_putc(&out, ' '); sb_putc(&out, '='); sb_putc(&out, ' ');
+            /* Skip the original ` = ` to copy only the value. */
+            size_t vs = lines[k].key_end;
+            size_t ve = lines[k].end;
+            while (vs < ve && input[vs] == ' ') vs++;
+            if (vs < ve && input[vs] == '=') vs++;
+            while (vs < ve && input[vs] == ' ') vs++;
+            sb_write(&out, input + vs, ve - vs);
+            sb_putc(&out, '\n');
+        }
+        i = j;
+    }
+
+    free(lines);
+    return out.data;
+}
+
 /* Format a source buffer. Caller must free() the returned string. */
 char *chcl_format(const char *src) {
     sbuf_t  sb      = {0};
@@ -651,7 +755,10 @@ char *chcl_format(const char *src) {
         next = lexer_next(&lex);
     }
     if (!at_bol && sb.len > 0) sb_putc(&sb, '\n');
-    return sb.data;
+    if (sb.len == 0) return sb.data;   /* empty input: nothing to align */
+    char *aligned = align_equals(sb.data);
+    free(sb.data);
+    return aligned;
 }
 
 /* ============================================================
@@ -802,4 +909,22 @@ char *chcl_format_file(const char *path) {
     char *r = chcl_format(buf);
     free(buf);
     return r;
+}
+
+/*
+ * Check whether a file on disk is already canonically formatted.
+ * Returns 1 (already formatted), 0 (would change), or -1 (I/O error).
+ * This lets `chcl fmt --check` behave like `gofmt -l` in CI pipelines.
+ */
+int chcl_format_is_canonical(const char *path) {
+    char *orig = read_whole_file(path);
+    if (!orig) return -1;
+
+    char *fmt = chcl_format(orig);
+    if (!fmt) { free(orig); return -1; }
+
+    int same = (strcmp(orig, fmt) == 0);
+    free(orig);
+    free(fmt);
+    return same;
 }

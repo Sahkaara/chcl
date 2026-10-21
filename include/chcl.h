@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT */
+
 /*
  * chcl.h - Public API for the chcl HCL toolkit.
  *
@@ -52,6 +54,13 @@ int chcl_document_error_line(chcl_document_t *doc);
 
 /* 1-based column of the last error (0 if no error). */
 int chcl_document_error_column(chcl_document_t *doc);
+
+/*
+ * Return 1 if the file at `path` is already canonically formatted,
+ * 0 if formatting would change it, -1 on I/O error.
+ * Useful for CI checks (`chcl fmt --check <file>`).
+ */
+int chcl_format_is_canonical(const char *path);
 
 #ifdef __cplusplus
 }
