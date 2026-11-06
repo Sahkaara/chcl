@@ -367,7 +367,7 @@ static body_t parse_body(parser_t *p) {
         while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
         if (p->cur.type == TOKEN_EOF || p->cur.type == TOKEN_RBRACE) break;
         if (p->cur.type != TOKEN_IDENT) {
-            set_error(p, "expexted identifier");
+            set_error(p, "expected identifier");
             return b;
         }
         

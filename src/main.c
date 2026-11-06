@@ -2,9 +2,9 @@
  * main.c - CLI entry point for chcl.
  *
  * Provides three subcommands:
- *   chcl fmt     [-w] <file>  Format (stdout, or in-place with -w)
- *   chcl to-json       <file>  Convert HCL to JSON
- *   chcl lint          <file>  Validate syntax, exit non-zero on error
+ *   chcl fmt     [-w] [--check] <file>  Format (stdout, or in-place)
+ *   chcl to-json                <file>  Convert HCL to JSON
+ *   chcl lint                   <file>  Validate syntax, exit non-zero on error
  *
  * Exit codes:
  *   0 = success
@@ -28,86 +28,108 @@ static void usage(void) {
         "   chcl --version              Print version\n");
 }
 
-    int main(int argc, char **argv) {
-        if(argc < 2) { usage(); return 1; }
+int main(int argc, char **argv) {
+    if (argc < 2) { usage(); return 1; }
 
-        const char *cmd = argv[1];
+    const char *cmd = argv[1];
 
-        /* --help / --version never read a file. */
-        if (!strcmp(cmd, "--help") || !strcmp(cmd, "-h")) { usage(); return 0; }
-        if (!strcmp(cmd, "--version")) { puts("chcl 0.1.0"); return 0; }
+    /* --help / --version never read a file. */
+    if (!strcmp(cmd, "--help") || !strcmp(cmd, "-h")) { usage(); return 0; }
+    if (!strcmp(cmd, "--version")) { puts("chcl 0.1.0"); return 0; }
 
-        /* --- fmt ---------------------------------------------------- *
-        * Supports: `-w` (write in place), `--check` (CI mode).        */
-        if (!strcmp(cmd, "fmt")) {
-            int inplace = 0, check = 0, argi = 2;
+    /* --- fmt ---------------------------------------------------- */
+    if (!strcmp(cmd, "fmt")) {
+        int inplace = 0, check = 0, argi = 2;
 
-            /* Parse leading flags in any order. */
-            for (; argi < argc && argv[argi][0] == '-'; argi++) {
-                if      (!strcmp(argv[argi], "-w"))      inplace = 1;
-                else if (!strcmp(argv[argi], "--check")) check   = 1;
-                else { usage(); return 1; }
-            }
-            if (argi >= argc) { usage(); return 1; }
-            const char *file = argv[argi];
+        /* Parse leading flags in any order. */
+        for (; argi < argc && argv[argi][0] == '-'; argi++) {
+            if      (!strcmp(argv[argi], "-w"))      inplace = 1;
+            else if (!strcmp(argv[argi], "--check")) check   = 1;
+            else { usage(); return 1; }
+        }
+        if (argi >= argc) { usage(); return 1; }
+        const char *file = argv[argi];
 
-            /* --check: exit 1 and print the filename if reformatting needed. */
-            if (check) {
-                int same = chcl_format_is_canonical(file);
-                if (same < 0) {
-                    fprintf(stderr, "error: cannot read %s\n", file);
-                    return 1;
-                }
-                if (!same) { puts(file); return 1; }
-                return 0;
-            }
-
-            /* Normal fmt: stdout, or -w to overwrite the file. */
-            char *out = chcl_format_file(file);
-            if (!out) {
+        /* --check: exit 1 and print the filename if reformatting needed. */
+        if (check) {
+            int same = chcl_format_is_canonical(file);
+            if (same < 0) {
                 fprintf(stderr, "error: cannot read %s\n", file);
                 return 1;
             }
-            if (inplace) {
-                FILE *f = fopen(file, "wb");
-                if (!f) {
-                    free(out);
-                    fprintf(stderr, "error: cannot write %s\n", file);
-                    return 1;
-                }
-                fputs(out, f);
-                fclose(f);
-            } else {
-                fputs(out, stdout);
-            }
-            free(out);
+            if (!same) { puts(file); return 1; }
             return 0;
         }
 
-        /* --- lint ----------------------------------------------- */
-        if (!strcmp(cmd, "lint")) {
-            if (argc < 3) { usage(); return 1; }
-
-            chcl_document_t *d = chcl_parse_file(argv[2]);
-            if (!d) {
-                fprintf(stderr, "error: cannot read %s\n", argv[2]);
+        /* Normal fmt: stdout, or -w to overwrite the file. */
+        char *out = chcl_format_file(file);
+        if (!out) {
+            fprintf(stderr, "error: cannot read %s\n", file);
+            return 1;
+        }
+        if (inplace) {
+            FILE *f = fopen(file, "wb");
+            if (!f) {
+                free(out);
+                fprintf(stderr, "error: cannot write %s\n", file);
                 return 1;
             }
+            fputs(out, f);
+            fclose(f);
+        } else {
+            fputs(out, stdout);
+        }
+        free(out);
+        return 0;
+    }
 
-            int rc = 0;
-            if (chcl_document_error(d)) {
-                fprintf(stderr, "%s:%d:%d: error: %s\n",
-                        argv[2],
+    /* --- to-json ----------------------------------------------- */
+    if (!strcmp(cmd, "to-json")) {
+        if (argc < 3) { usage(); return 1; }
+
+        chcl_document_t *d = chcl_parse_file(argv[2]);
+        if (!d) {
+            fprintf(stderr, "error: cannot read %s\n", argv[2]);
+            return 1;
+        }
+
+        if (chcl_document_error(d)) {
+            fprintf(stderr, "%s:%d:%d: error: %s\n", argv[2],
+                    chcl_document_error_line(d),
+                    chcl_document_error_column(d),
+                    chcl_document_error(d));
+            chcl_free_document(d);
+            return 2;
+        }
+
+        char *json = chcl_to_json(d);
+        if (json) { puts(json); free(json); }
+        chcl_free_document(d);
+        return 0;
+    }
+
+    /* --- lint -------------------------------------------------- */
+    if (!strcmp(cmd, "lint")) {
+        if (argc < 3) { usage(); return 1; }
+
+        chcl_document_t *d = chcl_parse_file(argv[2]);
+        if (!d) {
+            fprintf(stderr, "error: cannot read %s\n", argv[2]);
+            return 1;
+        }
+
+        int rc = 0;
+        if (chcl_document_error(d)) {
+            fprintf(stderr, "%s:%d:%d: error: %s\n", argv[2],
                     chcl_document_error_line(d),
                     chcl_document_error_column(d),
                     chcl_document_error(d));
             rc = 2;
-            }
-            chcl_free_document(d);
-            return rc;
         }
+        chcl_free_document(d);
+        return rc;
+    }
 
-        usage();
-        return 1;
+    usage();
+    return 1;
 }
-
