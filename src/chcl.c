@@ -94,20 +94,19 @@ typedef enum {
     TOKEN_IDENT,
     TOKEN_STRING,
     TOKEN_NUMBER,
+    /* Structural tokens */
     TOKEN_LBRACE,
     TOKEN_RBRACE,
     TOKEN_LBRACKET,
     TOKEN_RBRACKET,
+    TOKEN_LPAREN,
+    TOKEN_RPAREN,
     TOKEN_EQUALS,
     TOKEN_COMMA,
-    TOKEN_TRUE,
-    TOKEN_FALSE,
-    TOKEN_NULL,
-    TOKEN_COMMENT,
-    /* New TOKEN */
     TOKEN_DOT,
     TOKEN_QUESTION,
     TOKEN_COLON,
+    /* NEW: Math and logic operators for HCL expressions */
     TOKEN_PLUS,
     TOKEN_MINUS,
     TOKEN_STAR,
@@ -122,6 +121,11 @@ typedef enum {
     TOKEN_AND,
     TOKEN_OR,
     TOKEN_NOT,
+    /* Keywords and comments */
+    TOKEN_TRUE,
+    TOKEN_FALSE,
+    TOKEN_NULL,
+    TOKEN_COMMENT
 } token_type_t;
 
 typedef struct {
@@ -186,13 +190,60 @@ static token_t lexer_next(lexer_t *l) {
         return t;
     }
 
-    /* Single-character punctuation. */
+    /* Handle Heredocs: <<EOF ... EOF or <<-EOF ... EOF (trim indentation) */
+    if (c == '<' && l->src[l->pos+1] == '<') {
+        int start = l->pos;
+        l->pos += 2; l->column += 2;
+        if (l->src[l->pos] == '-') { l->pos++; l->column++; }
+        int id_start = l->pos;
+        while (isalnum((unsigned char)l->src[l->pos]) || l->src[l->pos] == '_') { l->pos++; l->column++; }
+        int id_len = l->pos - id_start;
+        while (l->src[l->pos] && l->src[l->pos] != '\n') { l->pos++; l->column++; }
+        if (l->src[l->pos] == '\n') { l->pos++; l->line++; l->column = 1; }
+
+        /* Scan until we find the closing indentifier on its own line */
+        while (l->src[l->pos]) {
+            int line_start = l->pos;
+            while (l->src[l->pos] && l->src[l->pos] != '\n') { l->pos++; }
+            int k = line_start;
+            while (l->src[k] == ' ' || l->src[k] == '\t') k++;
+            if ((size_t)(l->pos - k) == (size_t)id_len && !strncmp(l->src + k, l->src + id_start, id_len)) {
+                if (l->src[l->pos] == '\n') { l->pos++; l->line++; l->column = 1; }
+                break;
+            }
+            if (l->src[l->pos] == '\n') { l->pos++; l->line++; l->column = 1; }
+        }
+        /* Treat the entire heredoc as a single STRING token */
+        t.type = TOKEN_STRING; t.len = l->pos - start; return t;
+    }
+
+    /* Single-character structural tokens */
     if (c == '{') { l->pos++; l->column++; t.type = TOKEN_LBRACE;   t.len = 1; return t; }
     if (c == '}') { l->pos++; l->column++; t.type = TOKEN_RBRACE;   t.len = 1; return t; }
     if (c == '[') { l->pos++; l->column++; t.type = TOKEN_LBRACKET; t.len = 1; return t; }
     if (c == ']') { l->pos++; l->column++; t.type = TOKEN_RBRACKET; t.len = 1; return t; }
-    if (c == '=') { l->pos++; l->column++; t.type = TOKEN_EQUALS;   t.len = 1; return t; }
+    if (c == '(') { l->pos++; l->column++; t.type = TOKEN_LPAREN;   t.len = 1; return t; }
+    if (c == ')') { l->pos++; l->column++; t.type = TOKEN_RPAREN;   t.len = 1; return t; }
     if (c == ',') { l->pos++; l->column++; t.type = TOKEN_COMMA;    t.len = 1; return t; }
+    if (c == '.') { l->pos++; l->column++; t.type = TOKEN_DOT;      t.len = 1; return t; }
+    if (c == '?') { l->pos++; l->column++; t.type = TOKEN_QUESTION; t.len = 1; return t; }
+    if (c == ':') { l->pos++; l->column++; t.type = TOKEN_COLON;    t.len = 1; return t; }
+    if (c == '+') { l->pos++; l->column++; t.type = TOKEN_PLUS;     t.len = 1; return t; }
+    if (c == '*') { l->pos++; l->column++; t.type = TOKEN_STAR;     t.len = 1; return t; }
+    if (c == '/') { l->pos++; l->column++; t.type = TOKEN_SLASH;    t.len = 1; return t; }
+    if (c == '%') { l->pos++; l->column++; t.type = TOKEN_PERCENT;  t.len = 1; return t; }
+    if (c == '=') { l->pos++; l->column++; t.type = TOKEN_EQUALS;   t.len = 1; return t; }
+    if (c == '!') { l->pos++; l->column++; t.type = TOKEN_NOT;      t.len = 1; return t; }
+    if (c == '<') { l->pos++; l->column++; t.type = TOKEN_LT;       t.len = 1; return t; }
+    if (c == '>') { l->pos++; l->column++; t.type = TOKEN_GT;       t.len = 1; return t; }
+
+    /* Multi-character operators (must be checked before single-char ones) */
+    if (c == '=' && l->src[l->pos+1] == '=') { l->pos += 2; l->column += 2; t.type = TOKEN_EQEQ; t.len = 2; return t; }
+    if (c == '!' && l->src[l->pos+1] == '=') { l->pos += 2; l->column += 2; t.type = TOKEN_NEQ;  t.len = 2; return t; }
+    if (c == '<' && l->src[l->pos+1] == '=') { l->pos += 2; l->column += 2; t.type = TOKEN_LTE;  t.len = 2; return t; }
+    if (c == '>' && l->src[l->pos+1] == '=') { l->pos += 2; l->column += 2; t.type = TOKEN_GTE;  t.len = 2; return t; }
+    if (c == '&' && l->src[l->pos+1] == '&') { l->pos += 2; l->column += 2; t.type = TOKEN_AND;  t.len = 2; return t; }
+    if (c == '|' && l->src[l->pos+1] == '|') { l->pos += 2; l->column += 2; t.type = TOKEN_OR;   t.len = 2; return t; }
 
     /* String literal (no escape processing on the value itself yet). */
     if (c == '"') {
@@ -210,8 +261,9 @@ static token_t lexer_next(lexer_t *l) {
     }
 
     /* Numbers: optional '-', integer part, optional fractional part. */
-    if (isdigit((unsigned char)c) ||
-        (c == '-' && isdigit((unsigned char)l->src[l->pos + 1]))) {
+    if (isdigit((unsigned char)c) || (c == '-' && isdigit((unsigned char)l->src[l->pos + 1]))) {
+        /* Handle standalone minus operator (e.g., "a - b"). Negative numbers are handled above. */
+        if (c == '-') { l->pos++; l->column++; t.type = TOKEN_MINUS; t.len = 1; return t; }
         if (c == '-') { l->pos++; l->column++; }
         while (isdigit((unsigned char)l->src[l->pos])) { l->pos++; l->column++; }
         if (l->src[l->pos] == '.') {
