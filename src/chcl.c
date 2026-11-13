@@ -313,7 +313,7 @@ typedef struct {
     node_t **blocks;    size_t block_count, block_cap;
 } body_t;
 
-typedef enum {
+typedef enum { 
     NODE_STRING,
     NODE_NUMBER,
     NODE_BOOL,
@@ -321,26 +321,37 @@ typedef enum {
     NODE_LIST,
     NODE_OBJECT,
     NODE_BLOCK,
+    /* NEW: Expression node types for AST parsing */
+    NODE_TRAVERSAL,   /* e.g., var.ami_id or local.name */
+    NODE_CALL,        /* e.g., max(a, b) or length(var.list) */
+    NODE_BINARY,      /* e.g., a + b, a == b, a > b */
+    NODE_UNARY,       /* e.g., !var.enabled */
+    NODE_CONDITIONAL  /* e.g., var.enabled ? 1 : 0 */
 } node_type_t;
 
 struct node {
     node_type_t type;
 
-    /* Scalar payload (only one is meaningful per node type). */
-    char    *s;     /* NODE_STRING */
-    double   n;     /* NODE_NUMBER */
-    int      b;     /* NODE_BOOL */
+    /* Basic data types */
+    char *s;    /* String value or variable name */
+    double n;   /* Number value */
+    int b;      /* Boolean value */
 
-    /* NODE_LIST payload */
+    /* Lists and Object */
     node_t **items; size_t item_count, item_cap;
+    pair_t *pairs;  size_t pair_count, pair_cap;
 
-    /* NODE_OBJECT payload */
-    pair_t *pairs; size_t pair_count, pair_cap;
+    /* Blocks */
+    char *block_type;
+    char **labels; size_t label_count, label_cap;
+    body_t body;
 
-    /* NODE_BLOCK payload */
-    char    *block_type;                            /* e.g. "resource" */
-    char   **labels; size_t label_count, label_cap; /* e.g. "aws_instance" */
-    body_t body;                                    /* block contents */
+    /* NEW: Expression metadata */
+    char *op;                                       /* Operator text (e.g., "+", "==", "?") */
+    node_t *left, *right;                           /* Binary and Unary operands */
+    node_t *cond, *true_val, *false_val;            /* Conditional branches (cond ? true : false) */
+    node_t *callee;                                 /* Function identifier for calls (e.g., "max") */
+    node_t **args; size_t arg_count, arg_cap;       /* Arguments list for function calls */
 };
 
 /* Top-level document handle. */
@@ -876,6 +887,48 @@ static void json_emit_node(sbuf_t *sb, node_t *n) {
         }
         case NODE_BOOL: sb_puts(sb, n->b ? "true" : "false"); break;
         case NODE_NULL: sb_puts(sb, "null"); break;
+
+                case NODE_TRAVERSAL: 
+            sb_puts(sb, "{\"traversal\": ");
+            json_emit_str(sb, n->s);
+            sb_putc(sb, '}');
+            break;
+        case NODE_CALL:
+            sb_puts(sb, "{\"call\": ");
+            json_emit_str(sb, n->callee->s);
+            sb_puts(sb, ", \"args\": [");
+            for (size_t i = 0; i < n->arg_count; i++) {
+                if (i) sb_puts(sb, ", ");
+                json_emit_node(sb, n->args[i]);
+            }
+            sb_puts(sb, "]}");
+            break;
+        case NODE_BINARY:
+            sb_puts(sb, "{\"op\": ");
+            json_emit_str(sb, n->op);
+            sb_puts(sb, ", \"left\": ");
+            json_emit_node(sb, n->left);
+            sb_puts(sb, ", \"right\": ");
+            json_emit_node(sb, n->right);
+            sb_putc(sb, '}');
+            break;
+        case NODE_CONDITIONAL:
+            sb_puts(sb, "{\"cond\": ");
+            json_emit_node(sb, n->cond);
+            sb_puts(sb, ", \"true\": ");
+            json_emit_node(sb, n->true_val);
+            sb_puts(sb, ", \"false\": ");
+            json_emit_node(sb, n->false_val);
+            sb_putc(sb, '}');
+            break;
+
+        case NODE_UNARY:
+            sb_puts(sb, "{\"unary_op\": ");
+            json_emit_str(sb, n->op);
+            sb_puts(sb, ", \"operand\": ");
+            json_emit_node(sb, n->left);
+            sb_putc(sb, '}');
+            break;
 
         case NODE_LIST:
             sb_putc(sb, '[');
