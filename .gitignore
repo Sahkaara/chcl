@@ -1,10 +1,32 @@
-# Build artifacts
+# Build artifacts (Linux / macOS)
 *.o
-chcl
-chcl.exe
 *.out
+*.a
+*.so
+*.dylib
+chcl
 
-# Editor / OS noise
-.DS_Store
+# Build artifacts (Windows)
+*.obj
+*.exe
+*.dll
+*.lib
+chcl.exe
+
+# Crash dumps (MinGW/GCC su Windows)
+*.stackdump
+
+# File di test temporanei
+test.hcl
+test.wgsl
+messy.hcl
+
+# Editor / IDE
 .vscode/
+.idea/
 *.swp
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db

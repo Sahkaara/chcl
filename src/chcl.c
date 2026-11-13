@@ -125,6 +125,7 @@ typedef enum {
     TOKEN_TRUE,
     TOKEN_FALSE,
     TOKEN_NULL,
+    TOKEN_HEREDOC,
     TOKEN_COMMENT
 } token_type_t;
 
@@ -214,7 +215,7 @@ static token_t lexer_next(lexer_t *l) {
             if (l->src[l->pos] == '\n') { l->pos++; l->line++; l->column = 1; }
         }
         /* Treat the entire heredoc as a single STRING token */
-        t.type = TOKEN_STRING; t.len = l->pos - start; return t;
+        t.type = TOKEN_HEREDOC; t.len = l->pos - start; return t;
     }
 
     /* Single-character structural tokens */
@@ -262,9 +263,7 @@ static token_t lexer_next(lexer_t *l) {
 
     /* Numbers: optional '-', integer part, optional fractional part. */
     if (isdigit((unsigned char)c) || (c == '-' && isdigit((unsigned char)l->src[l->pos + 1]))) {
-        /* Handle standalone minus operator (e.g., "a - b"). Negative numbers are handled above. */
-        if (c == '-') { l->pos++; l->column++; t.type = TOKEN_MINUS; t.len = 1; return t; }
-        if (c == '-') { l->pos++; l->column++; }
+        if (c == '-') { l->pos++; l->column++; } /* Consume the minus sign */
         while (isdigit((unsigned char)l->src[l->pos])) { l->pos++; l->column++; }
         if (l->src[l->pos] == '.') {
             l->pos++; l->column++;
@@ -494,101 +493,199 @@ static body_t parse_body(parser_t *p) {
     return b;
 }
 
-/* Parse a single value expression. */
-static node_t *parse_expr(parser_t *p) {
-    switch (p->cur.type) {
-        case TOKEN_STRING: {
-            node_t *n = alloc_node(p, NODE_STRING);
-            if (n) n->s = token_text(&p->doc->arena, p->cur);
-            advance(p);
-            return n;
-        }
-        case TOKEN_NUMBER: {
-            node_t *n = alloc_node(p, NODE_NUMBER);
-            if (n) n->n = strtod(p->cur.start, NULL);
-            advance(p);
-            return n;
-        }
-        case TOKEN_TRUE: case TOKEN_FALSE: {
-            node_t *n = alloc_node(p, NODE_BOOL);
-            if (n) n->b = (p->cur.type == TOKEN_TRUE);
-            advance(p);
-            return n;
-        }
-        case TOKEN_NULL: {
-            node_t *n = alloc_node(p, NODE_NULL);
-            advance(p);
-            return n;
-        }
-        /* NEW: bare identifiers as values (e.g. `type = string`).
-         * In real HCL this is a variable/type reference; our subset
-         * simplifies by materializing it as a string node. */
-        case TOKEN_IDENT: {
-            node_t *n = alloc_node(p, NODE_STRING);
-            if (n) n->s = token_text(&p->doc->arena, p->cur);
-            advance(p);
-            return n;
-        }
-        case TOKEN_LBRACKET: {
-            /* List literal: `[a, b, c]` (trailing comma tolerated). */
-            node_t *n = alloc_node(p, NODE_LIST);
-            if (!n) return NULL;
-            advance(p);
-            for (;;) {
-                while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
-                if (p->cur.type == TOKEN_RBRACKET || p->cur.type == TOKEN_EOF) break;
-                node_t *item = parse_expr(p);
-                if (!item) return NULL;
-                if (!grow((void **)&n->items, &n->item_cap,
-                          n->item_count, sizeof(node_t *))) return NULL;
-                n->items[n->item_count++] = item;
-                while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
-                if (p->cur.type == TOKEN_COMMA) advance(p);
-            }
-            if (p->cur.type != TOKEN_RBRACKET) {
-                set_error(p, "expected ']'");
-                return NULL;
-            }
-            advance(p);
-            return n;
-        }
-        case TOKEN_LBRACE: {
-            /* Object literal: `{ key = value, ... }`. */
-            node_t *n = alloc_node(p, NODE_OBJECT);
-            if (!n) return NULL;
-            advance(p);
-            for (;;) {
-                while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
-                if (p->cur.type == TOKEN_RBRACE || p->cur.type == TOKEN_EOF) break;
-                if (p->cur.type != TOKEN_IDENT && p->cur.type != TOKEN_STRING) {
-                    set_error(p, "expected key");
-                    return NULL;
-                }
-                char *key = token_text(&p->doc->arena, p->cur);
-                advance(p);
-                if (p->cur.type != TOKEN_EQUALS) {
-                    set_error(p, "expected '='");
-                    return NULL;
-                }
-                advance(p);
-                node_t *val = parse_expr(p);
-                if (!val) return NULL;
-                if (!grow((void **)&n->pairs, &n->pair_cap, n->pair_count, sizeof(pair_t))) return NULL;
-                n->pairs[n->pair_count++] = (pair_t){key, val};
-                while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
-                if (p->cur.type == TOKEN_COMMA) advance(p);
-            }
-            if (p->cur.type != TOKEN_RBRACE) {
-                set_error(p, "expected '}'");
-                return NULL;
-            }
-            advance(p);
-            return n;
-        }
-        default:
-            set_error(p, "expected expression");
-            return NULL;
+/* 
+ * Returns the precedence level of an operator token. 
+ * Higher numbers bind tighter (e.g., * is 6, + is 5).
+ */
+static int get_prec(token_type_t t) {
+    switch (t) {
+        case TOKEN_OR: return 1;
+        case TOKEN_AND: return 2;
+        case TOKEN_EQEQ: case TOKEN_NEQ: return 3;
+        case TOKEN_LT: case TOKEN_GT: case TOKEN_LTE: case TOKEN_GTE: return 4;
+        case TOKEN_PLUS: case TOKEN_MINUS: return 5;
+        case TOKEN_STAR: case TOKEN_SLASH: case TOKEN_PERCENT: return 6;
+        default: return -1;
     }
+}
+
+/* 
+ * Parses basic values: literals, variable traversals, function calls, lists, and objects.
+ */
+static node_t *parse_primary(parser_t *p) { 
+    /* Handle unary operators: !true or -5 */
+    if (p->cur.type == TOKEN_NOT || p->cur.type == TOKEN_MINUS) {
+        token_t op = p->cur;
+        advance(p);
+        node_t *n = alloc_node(p, NODE_UNARY);
+        n->op = token_text(&p->doc->arena, op);
+        n->left = parse_primary(p); /* Legge il valore subito dopo (es. il 5) */
+        return n;
+    }
+        /* Accept both strings and heredocs as literal string nodes */
+    if (p->cur.type == TOKEN_STRING || p->cur.type == TOKEN_HEREDOC) {
+        node_t *n = alloc_node(p, NODE_STRING); 
+        n->s = token_text(&p->doc->arena, p->cur); 
+        advance(p); 
+        return n;
+    }
+    if (p->cur.type == TOKEN_NUMBER) {
+        node_t *n = alloc_node(p, NODE_NUMBER); n->n = strtod(p->cur.start, NULL); advance(p); return n;
+    }
+    if (p->cur.type == TOKEN_TRUE || p->cur.type == TOKEN_FALSE) {
+        node_t *n = alloc_node(p, NODE_BOOL); n->b = (p->cur.type == TOKEN_TRUE); advance(p); return n;
+    }
+    if (p->cur.type == TOKEN_NULL) { 
+        node_t *n = alloc_node(p, NODE_NULL); advance(p); return n; 
+    }
+    
+    /* Handle identifiers, traversals (var.ami), and calls (max(a,b)) */
+    if (p->cur.type == TOKEN_IDENT) {
+        token_t ident = p->cur;
+        advance(p);
+        node_t *n = alloc_node(p, NODE_TRAVERSAL);
+        n->s = token_text(&p->doc->arena, ident);
+        
+        /* Handle dotted traversals: var.foo.bar */
+        while (p->cur.type == TOKEN_DOT) {
+            advance(p);
+            if (p->cur.type != TOKEN_IDENT) { set_error(p, "expected identifier after '.'"); return NULL; }
+            char *part = token_text(&p->doc->arena, p->cur);
+            size_t new_len = strlen(n->s) + 1 + strlen(part);
+            char *new_s = arena_alloc(&p->doc->arena, new_len + 1);
+            sprintf(new_s, "%s.%s", n->s, part);
+            n->s = new_s;
+            advance(p);
+        }
+
+        /* Handle function calls: max(a, b) */
+        if (p->cur.type == TOKEN_LPAREN) {
+            advance(p);
+            node_t *call = alloc_node(p, NODE_CALL);
+            call->callee = n;
+            while (p->cur.type != TOKEN_RPAREN && p->cur.type != TOKEN_EOF) {
+                node_t *arg = parse_expr(p); /* Forward-declared above */
+                if (!arg) return NULL;
+                if (!grow((void**)&call->args, &call->arg_cap, call->arg_count, sizeof(node_t*))) return NULL;
+                call->args[call->arg_count++] = arg;
+                if (p->cur.type == TOKEN_COMMA) advance(p);
+            }
+            if (p->cur.type != TOKEN_RPAREN) { set_error(p, "expected ')'"); return NULL; }
+            advance(p);
+            return call;
+        }
+        return n;
+    }
+
+    /* Handle parenthesized expressions: (a + b) */
+    if (p->cur.type == TOKEN_LPAREN) {
+        advance(p);
+        node_t *n = parse_expr(p);
+        if (p->cur.type != TOKEN_RPAREN) { set_error(p, "expected ')'"); return NULL; }
+        advance(p); return n;
+    }
+
+    /* Handle list literals: [a, b, c] */
+    if (p->cur.type == TOKEN_LBRACKET) {
+        advance(p);
+        /* Special case: skip `for` expressions to prevent parser crashes. */
+        if (p->cur.type == TOKEN_IDENT && p->cur.len == 3 && !strncmp(p->cur.start, "for", 3)) {
+            node_t *n = alloc_node(p, NODE_STRING);
+            int depth = 1;
+            const char *start = p->cur.start;
+            while (p->cur.type != TOKEN_EOF && depth > 0) {
+                if (p->cur.type == TOKEN_LBRACKET) depth++;
+                if (p->cur.type == TOKEN_RBRACKET) depth--;
+                advance(p);
+            }
+            n->s = arena_strdup(&p->doc->arena, start, p->cur.start - start);
+            return n;
+        }
+        
+        node_t *n = alloc_node(p, NODE_LIST);
+        for (;;) {
+            while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
+            if (p->cur.type == TOKEN_RBRACKET || p->cur.type == TOKEN_EOF) break;
+            node_t *item = parse_expr(p);
+            if (!item) return NULL;
+            if (!grow((void**)&n->items, &n->item_cap, n->item_count, sizeof(node_t*))) return NULL;
+            n->items[n->item_count++] = item;
+            while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
+            if (p->cur.type == TOKEN_COMMA) advance(p);
+        }
+        if (p->cur.type != TOKEN_RBRACKET) { set_error(p, "expected ']'"); return NULL; }
+        advance(p); return n;
+    }
+    
+    /* Handle object literals: { key = value } */
+    if (p->cur.type == TOKEN_LBRACE) {
+        node_t *n = alloc_node(p, NODE_OBJECT);
+        advance(p);
+        for (;;) {
+            while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
+            if (p->cur.type == TOKEN_RBRACE || p->cur.type == TOKEN_EOF) break;
+            if (p->cur.type != TOKEN_IDENT && p->cur.type != TOKEN_STRING) { set_error(p, "expected key"); return NULL; }
+            char *key = token_text(&p->doc->arena, p->cur);
+            advance(p);
+            if (p->cur.type != TOKEN_EQUALS && p->cur.type != TOKEN_COLON) { set_error(p, "expected '=' or ':'"); return NULL; }
+            advance(p);
+            node_t *val = parse_expr(p);
+            if (!val) return NULL;
+            if (!grow((void**)&n->pairs, &n->pair_cap, n->pair_count, sizeof(pair_t))) return NULL;
+            n->pairs[n->pair_count++] = (pair_t){key, val};
+            while (p->cur.type == TOKEN_NEWLINE || p->cur.type == TOKEN_COMMENT) advance(p);
+            if (p->cur.type == TOKEN_COMMA) advance(p);
+        }
+        if (p->cur.type != TOKEN_RBRACE) { set_error(p, "expected '}'"); return NULL; }
+        advance(p); return n;
+    }
+    
+    set_error(p, "expected expression"); return NULL;
+}
+
+/* 
+ * Precedence climbing algorithm for binary operators.
+ * Ensures that e.g. `a + b * c` parses as `a + (b * c)`.
+ */
+static node_t *parse_binary(parser_t *p, int min_prec) {
+    node_t *left = parse_primary(p);
+    if (!left) return NULL;
+    for (;;) {
+        int prec = get_prec(p->cur.type);
+        if (prec < min_prec) break;
+        token_t op = p->cur;
+        advance(p);
+        node_t *right = parse_binary(p, prec + 1);
+        if (!right) return NULL;
+        node_t *n = alloc_node(p, NODE_BINARY);
+        n->op = token_text(&p->doc->arena, op);
+        n->left = left; n->right = right;
+        left = n;
+    }
+    return left;
+}
+
+/* 
+ * Top-level expression parser: handles binary operators and conditionals.
+ */
+    static node_t *parse_expr(parser_t *p) {
+        node_t *cond = parse_binary(p, 0);
+        if (!cond) return NULL;
+    
+    /* Handle ternary conditional: cond ? true_val : false_val */
+    if (p->cur.type == TOKEN_QUESTION) {
+        advance(p);
+        node_t *t = parse_expr(p);
+        if (!t) return NULL;
+        if (p->cur.type != TOKEN_COLON) { set_error(p, "expected ':'"); return NULL; }
+        advance(p);
+        node_t *f = parse_expr(p);
+        if (!f) return NULL;
+        node_t *n = alloc_node(p, NODE_CONDITIONAL);
+        n->cond = cond; n->true_val = t; n->false_val = f;
+        return n;
+    }
+    return cond;
 }
 
 /* Public entry point: parse a NUL-terminated source string. */
@@ -653,13 +750,25 @@ static int is_word_tok(token_type_t t) {
 }
 
 /* Decide whether a space is required between two consecutive tokens. */
+static int is_op_tok(token_type_t t) {
+    return t == TOKEN_PLUS || t == TOKEN_MINUS || t == TOKEN_STAR || t == TOKEN_SLASH || t == TOKEN_PERCENT ||
+           t == TOKEN_EQEQ || t == TOKEN_NEQ || t == TOKEN_LT || t == TOKEN_GT || t == TOKEN_LTE || t == TOKEN_GTE ||
+           t == TOKEN_AND || t == TOKEN_OR || t == TOKEN_QUESTION || t == TOKEN_COLON;
+}
+
 static int needs_space(token_t prev, token_t cur) {
     if (prev.type == TOKEN_EQUALS) return 1;
     if (cur.type  == TOKEN_EQUALS) return 1;
     if (prev.type == TOKEN_COMMA)  return 1;
-    if (cur.type  == TOKEN_COMMA || cur.type == TOKEN_RBRACKET) return 0;
-    if (prev.type == TOKEN_LBRACKET) return 0;
-    if (cur.type  == TOKEN_LBRACE)   return 1;
+    
+    if (cur.type == TOKEN_COMMA || cur.type == TOKEN_RPAREN || cur.type == TOKEN_RBRACKET || cur.type == TOKEN_DOT) return 0;
+    if (prev.type == TOKEN_LPAREN || prev.type == TOKEN_LBRACKET || prev.type == TOKEN_DOT || prev.type == TOKEN_NOT) return 0;
+    
+    if (cur.type == TOKEN_LPAREN && prev.type == TOKEN_IDENT) return 0;
+    
+    if (is_op_tok(prev.type) || is_op_tok(cur.type)) return 1;
+    
+    if (cur.type == TOKEN_LBRACE) return 1;
     if (is_word_tok(prev.type) && is_word_tok(cur.type)) return 1;
     return 0;
 }

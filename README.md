@@ -319,12 +319,10 @@ Make it executable (`chmod +x .git/hooks/pre-commit`). Any staged `.hcl` file th
 | Line comments (`#`, `//`) | ✅ | Preserved by `fmt` |
 | Block comments (`/* ... */`) | ✅ | Preserved by `fmt` |
 | Bare identifiers as values (`type = string`) | ✅ | Materialized as strings |
-| **Interpolations** (`${...}`) | ❌ | Planned |
-| **Heredocs** (`<<EOF ... EOF`) | ❌ | Planned |
-| **`for` expressions** | ❌ | Planned |
-| **Conditionals / functions** | ❌ | Planned |
-
-If you need one of the ❌ features, please [open an issue](https://github.com/Sahkaara/chcl/issues) — PRs welcome.
+| Interpolations (`${...}`) | ✅ | Preserved verbatim inside strings |
+| Heredocs (`<<EOF ... EOF`) | ✅ | Parsed as multiline strings |
+| `for` expressions | 🟨 | Parsed as opaque blocks (not evaluated) |
+| Conditionals / functions | ✅ | Parsed as AST nodes (Conditional, Call, Binary) |
 
 ---
 
