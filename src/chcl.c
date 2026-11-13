@@ -104,7 +104,7 @@ typedef enum {
     TOKEN_FALSE,
     TOKEN_NULL,
     TOKEN_COMMENT,
-    /* Nuovi token */
+    /* New TOKEN */
     TOKEN_DOT,
     TOKEN_QUESTION,
     TOKEN_COLON,
