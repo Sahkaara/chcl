@@ -104,6 +104,24 @@ typedef enum {
     TOKEN_FALSE,
     TOKEN_NULL,
     TOKEN_COMMENT,
+    /* Nuovi token */
+    TOKEN_DOT,
+    TOKEN_QUESTION,
+    TOKEN_COLON,
+    TOKEN_PLUS,
+    TOKEN_MINUS,
+    TOKEN_STAR,
+    TOKEN_SLASH,
+    TOKEN_PERCENT,
+    TOKEN_EQEQ,
+    TOKEN_NEQ,
+    TOKEN_LT,
+    TOKEN_GT,
+    TOKEN_LTE,
+    TOKEN_GTE,
+    TOKEN_AND,
+    TOKEN_OR,
+    TOKEN_NOT,
 } token_type_t;
 
 typedef struct {
