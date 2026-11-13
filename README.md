@@ -190,8 +190,13 @@ $ chcl to-json examples/sample.hcl
 ```
 
 **JSON schema used:**
-- Attributes → direct keys on the enclosing object.
-- Blocks → keyed by block type, with `{"labels": [...], "body": {...}}` as value.
+- **Attributes** → direct keys on the enclosing object.
+- **Blocks** → keyed by block type, with `{"labels": [...], "body": {...}}` as value.
+- **Expressions** → nested objects with a specific structure:
+  - Binary ops: `{"op": "+", "left": 5, "right": 3}`
+  - Traversals: `{"traversal": "var.ami_id"}`
+  - Function calls: `{"call": "max", "args": [1, 2]}`
+  - Conditionals: `{"cond": ..., "true": ..., "false": ...}`
 
 ---
 
@@ -399,6 +404,9 @@ Golden-file tests live in `tests/cases/` — drop a `foo.hcl` and its expected `
 - [x] `fmt`, `lint`, `to-json`
 - [x] `fmt --check` CI mode
 - [x] Alignment of `=` within blocks
+- [x] Basic expressions: binary operators, conditionals, function calls
+- [x] Heredoc support (`<<EOF ... EOF`)
+- [x] Interpolation support (preserved as strings)
 - [ ] Preserve blank lines and comments in `fmt` output
 - [ ] Heredoc support (`<<EOF ... EOF`)
 - [ ] Interpolation support (`${ ... }`)
