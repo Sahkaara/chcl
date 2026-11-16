@@ -1,0 +1,10 @@
+# Keep portable scripts and fixtures independent of core.autocrlf.
+*.sh text eol=lf
+Makefile text eol=lf
+*.yml text eol=lf
+*.hcl text eol=lf
+*.expected text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf

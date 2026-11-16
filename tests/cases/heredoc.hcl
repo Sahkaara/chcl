@@ -1,0 +1,5 @@
+message=<<EOF
+a = 1
+longer = 2
+EOF
+other=2

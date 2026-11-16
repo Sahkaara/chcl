@@ -30,3 +30,8 @@ messy.hcl
 # OS noise
 .DS_Store
 Thumbs.db
+# Native regression-test executable
+tests/test_core
+
+# Isolated validation artifacts
+/build/

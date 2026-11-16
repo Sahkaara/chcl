@@ -6,9 +6,8 @@
  * This header exposes a small, stable C API to parse, format,
  * and convert HCL (HashiCorp Configuration Language) documents.
  *
- * All functions are thread-unsafe by default; the parser state lives
- * inside the document handle, so distinct documents can be parsed
- * concurrently from distinct threads.
+ * Distinct documents can be used concurrently. Do not access the same
+ * document concurrently while another thread releases it.
  *
  * Memory ownership rules:
  *   - Every chcl_document_t* returned by a chcl_parse_* function
@@ -28,22 +27,34 @@ extern "C" {
 /* Opaque handle to a parsed HCL document */
 typedef struct chcl_document chcl_document_t;
 
-/* Parse an in-memory NUL-terminated string. Returns NULL only on OOM. */
+/* Parse a NUL-terminated string. NULL on OOM, NULL input or size limit.
+ * Syntax errors return a document: inspect chcl_document_error().
+ * Input limit: INT_MAX / 4 bytes; parser recursion limit: 128 frames.
+ * Escaped U+0000 is rejected because API strings are NUL-terminated.
+ */
 chcl_document_t *chcl_parse_string(const char *src);
 
-/* Parse a file from disk. Returns NULL if the file cannot be read or parsed. */
+/* Parse a seekable file. NULL on I/O/OOM/size failure or embedded NUL.
+ * Syntax errors return a document with chcl_document_error() set.
+ */
 chcl_document_t *chcl_parse_file(const char *path);
 
 /* Release a document handle and all memory owned by it. Safe on NULL. */
 void chcl_free_document(chcl_document_t *doc);
 
-/* Format a source buffer and return a newly allocated string (free() it). */
+/* Format a source buffer; free() the result, including an empty string.
+ * NULL on invalid arguments, lexical error, OOM or size limit.
+ * Formatting does not validate the complete parser grammar.
+ */
 char *chcl_format(const char *src);
 
 /* Read a file, format it, and return the result (free() it). */
 char *chcl_format_file(const char *path);
 
-/* Serialize a parsed document to JSON (free() the returned string). */
+/* Serialize a parsed document; free() the result. NULL on invalid/error
+ * document, OOM, output size limit or serialization depth over 512 nodes.
+ * Numbers retain their source spelling. Each block type maps to an array.
+ */
 char *chcl_to_json(chcl_document_t *doc);
 
 /* Human-readable error message for the last failure, or NULL if OK. */
@@ -57,7 +68,7 @@ int chcl_document_error_column(chcl_document_t *doc);
 
 /*
  * Return 1 if the file at `path` is already canonically formatted,
- * 0 if formatting would change it, -1 on I/O error.
+ * 0 if formatting would change it, -1 on I/O/formatting/OOM error.
  * Useful for CI checks (`chcl fmt --check <file>`).
  */
 int chcl_format_is_canonical(const char *path);

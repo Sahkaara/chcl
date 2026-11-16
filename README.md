@@ -7,7 +7,7 @@
 [![C11](https://img.shields.io/badge/C-C11-blue.svg)](https://en.cppreference.com/w/c/11)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#)
 
-`chcl` is a lightweight toolkit for working with [HCL](https://github.com/hashicorp/hcl) (HashiCorp Configuration Language), the language behind Terraform, Packer, Vault, and other HashiCorp tools. It's written in portable C11 with **zero external dependencies**, and compiles to a **single static binary** in under a second.
+`chcl` is a lightweight toolkit for working with [HCL](https://github.com/hashicorp/hcl) (HashiCorp Configuration Language), the language behind Terraform, Packer, Vault, and other HashiCorp tools. It's written in portable C11 with **zero external dependencies**, and compiles to a **single executable** in under a second.
 
 Use it from the command line to format or validate `.hcl` files, or link it as a library from your own C project.
 
@@ -45,7 +45,7 @@ There are excellent HCL parsers in Go, Rust, and C++ — but almost nothing usab
 
 `chcl` fills that gap with three properties that matter:
 
-- **Zero dependencies.** Just `libc`. Builds with `cc`, `gcc`, `clang`, or MSVC.
+- **Zero dependencies.** Uses the C runtime plus native file-replacement APIs on Windows. GCC and Clang are supported; MSVC is not yet verified.
 - **Single binary.** No shared libraries to install, no version conflicts, no Python/Node/Go runtime.
 - **Fast.** Parses and formats a typical Terraform file in microseconds.
 
@@ -142,7 +142,17 @@ chcl fmt examples/sample.hcl
 chcl fmt -w examples/sample.hcl
 ```
 
-The formatter works **directly on the token stream**, so it succeeds even on files that the parser would reject. This makes it safe to run as a pre-commit hook on any `.hcl` file.
+`-w` writes an exclusive temporary beside the destination, checks the write,
+flush, disk synchronization and close, then replaces the original. On POSIX the
+temporary starts with private permissions (0600). It requires write access to the directory.
+Replacement is not a power-loss durability guarantee. POSIX permission bits are
+preserved; Windows uses `ReplaceFileA` to preserve destination metadata. POSIX
+ACLs and extended attributes are not preserved. On POSIX, `-w` refuses symbolic
+links, multiply-linked files and special files instead of replacing their identities.
+Use `fmt -- <path>` for paths beginning with `-`. Extra file arguments and the
+combination `-w --check` are rejected.
+
+The formatter works **directly on the token stream**, so it succeeds even on files that the parser would reject. Lexical errors (including unknown characters and unterminated literals) fail without producing a replacement. This is a subset formatter, not a complete HCL validator. Multiline literal and comment contents are excluded from alignment.
 
 ### `chcl fmt --check`
 
@@ -150,7 +160,7 @@ The CI-friendly mode. Behaves like `gofmt -l`:
 
 - Exit **0** if the file is already canonically formatted.
 - Exit **1** and print the filename if formatting would change it.
-- Exit **1** and print an error if the file can't be read.
+- Exit **1** and print an error on read, formatting or allocation failure.
 
 ```bash
 chcl fmt --check infra/main.hcl
@@ -186,13 +196,15 @@ Serializes the parsed AST to compact JSON. Useful for:
 
 ```bash
 $ chcl to-json examples/sample.hcl
-{"variable": {"labels": ["region"], "body": {"default": "eu-west-1", "type": "string"}}, "resource": {"labels": ["aws_instance", "web"], "body": {"ami": "ami-12345", ...}}}
+{"variable": [{"labels": ["region"], "body": {"default": "eu-west-1", "type": {"traversal": "string"}}}], "resource": [{"labels": ["aws_instance", "web"], "body": {"ami": "ami-12345", "count": 3}}]}
 ```
 
 **JSON schema used:**
-- **Attributes** → direct keys on the enclosing object.
-- **Blocks** → keyed by block type, with `{"labels": [...], "body": {...}}` as value.
+- **Attributes** → direct keys on the enclosing object. Duplicate keys and attribute/block name collisions are rejected.
+- **Numbers** → emitted from validated source spelling, without floating-point rounding or locale conversion.
+- **Blocks** → keyed by block type, always as an array (schema change), with `{"labels": [...], "body": {...}}` as each element.
 - **Expressions** → nested objects with a specific structure:
+  - Unary ops: `{"unary_op": "!", "operand": false}`
   - Binary ops: `{"op": "+", "left": 5, "right": 3}`
   - Traversals: `{"traversal": "var.ami_id"}`
   - Function calls: `{"call": "max", "args": [1, 2]}`
@@ -300,10 +312,11 @@ Create `.git/hooks/pre-commit`:
 
 ```bash
 #!/bin/sh
-exec chcl fmt --check $(git diff --cached --name-only --diff-filter=ACM | grep '\.hcl$' || true)
+git diff --cached --name-only --diff-filter=ACM -z -- '*.hcl' |
+  xargs -0 -r -n1 chcl fmt --check --
 ```
 
-Make it executable (`chmod +x .git/hooks/pre-commit`). Any staged `.hcl` file that isn't canonically formatted will block the commit.
+Make it executable (`chmod +x .git/hooks/pre-commit`). This checks working-tree contents for staged paths; it does not inspect staged blobs when files are partially staged. Any selected file that is not canonically formatted blocks the commit.
 
 ---
 
@@ -315,18 +328,18 @@ Make it executable (`chmod +x .git/hooks/pre-commit`). Any staged `.hcl` file th
 |---|:---:|---|
 | Attributes (`key = value`) | ✅ | |
 | Blocks (`resource "x" "y" { ... }`) | ✅ | With any number of labels |
-| Strings (`"..."`) | ✅ | Escapes are preserved verbatim |
-| Numbers (int/float) | ✅ | Parsed via `strtod` |
+| Strings (`"..."`) | ✅ | UTF-8 validated; escapes decoded for JSON; source spelling preserved by fmt |
+| Numbers (int/float) | ✅ | Validated decimal spelling retained, including exponents |
 | Booleans (`true` / `false`) | ✅ | |
 | `null` | ✅ | |
 | Lists (`[a, b, c]`) | ✅ | Trailing comma tolerated |
 | Object literals (`{ k = v }`) | ✅ | |
 | Line comments (`#`, `//`) | ✅ | Preserved by `fmt` |
 | Block comments (`/* ... */`) | ✅ | Preserved by `fmt` |
-| Bare identifiers as values (`type = string`) | ✅ | Materialized as strings |
+| Bare identifiers as values (`type = string`) | ✅ | Serialized as traversal nodes |
 | Interpolations (`${...}`) | ✅ | Preserved verbatim inside strings |
 | Heredocs (`<<EOF ... EOF`) | ✅ | Parsed as multiline strings |
-| `for` expressions | 🟨 | Parsed as opaque blocks (not evaluated) |
+| `for` expressions | 🟨 | List comprehensions retained as opaque text; not evaluated |
 | Conditionals / functions | ✅ | Parsed as AST nodes (Conditional, Call, Binary) |
 
 ---
@@ -364,7 +377,7 @@ The design trade-offs are documented at the top of each section in `src/chcl.c`.
 
 ## Building from source
 
-**Requirements:** a C11 compiler (`cc`, `gcc`, `clang`, `cl`) and `make`.
+**Requirements:** a C11 compiler (GCC or Clang), GNU Make, Bash and basic POSIX test utilities. The C library itself has no third-party dependencies. MSVC and Windows Unicode paths are not yet verified.
 
 ```bash
 make              # builds ./chcl
@@ -387,14 +400,30 @@ make CC=clang CFLAGS="-O3 -march=native -Wall -Wextra"
 make test
 ```
 
-Runs `tests/test_basic.sh`, a shell-based smoke suite covering:
+Runs native API/allocation-failure regressions in `tests/test_core.c`, then CLI regressions in `tests/test_basic.sh`, covering:
 
 - `lint` on valid and invalid input
 - `fmt` output stability
 - `fmt --check` exit codes
 - `to-json` on the sample file
 
-Golden-file tests live in `tests/cases/` — drop a `foo.hcl` and its expected `foo.hcl.expected` and the suite picks it up automatically.
+Optional golden fixtures can be added under `tests/cases/`: each `foo.hcl` needs
+`foo.hcl.expected`. The shell suite discovers these pairs; basic formatting and
+heredoc-preservation fixtures are bundled.
+Core checks also cover malformed literals, operators, nesting limits, Unicode
+escapes, invalid UTF-8, heredoc preservation, repeated blocks and failure at each
+allocation. Generated checks compare ASTs before/after formatting for 960 expression
+cases; 5,000 deterministic malformed byte inputs exercise parser/formatter cleanup.
+CI is configured for GCC and Clang, plus AddressSanitizer/UndefinedBehaviorSanitizer
+and leak checks on Linux. These sanitizer runs require compiler runtime support.
+Builds and regressions have also been verified locally on Windows/MinGW and on
+Linux/GCC with all three sanitizer checks enabled.
+
+Limits: input and generated output are bounded by `INT_MAX / 4` bytes; parsing
+uses at most 128 recursive parser frames and JSON serialization at most 512
+node levels. Embedded NUL bytes and escaped U+0000 are rejected. Interpolations
+and list `for` expressions are preserved as text, not evaluated or fully
+validated. This remains an HCL subset, not a replacement for Terraform validation.
 
 ---
 
@@ -407,9 +436,7 @@ Golden-file tests live in `tests/cases/` — drop a `foo.hcl` and its expected `
 - [x] Basic expressions: binary operators, conditionals, function calls
 - [x] Heredoc support (`<<EOF ... EOF`)
 - [x] Interpolation support (preserved as strings)
-- [ ] Preserve blank lines and comments in `fmt` output
-- [ ] Heredoc support (`<<EOF ... EOF`)
-- [ ] Interpolation support (`${ ... }`)
+- [x] Preserve blank lines and comments in `fmt` output
 - [ ] Configurable lint rules via `.chcllint` file
 - [ ] `chcl get <path>` — jq-style query on the AST
 - [ ] Pre-built binaries via GitHub Releases

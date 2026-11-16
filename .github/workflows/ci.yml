@@ -8,16 +8,27 @@ on:
 
 jobs:
   build:
-    name: Build & test
+    name: Build & test (${{ matrix.cc }})
+    strategy:
+      matrix:
+        cc: [gcc, clang]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang
 
       - name: Build
-        run: make
+        run: make CC=${{ matrix.cc }}
 
       - name: Test
-        run: make test
+        run: make test CC=${{ matrix.cc }}
+
+      - name: Address, undefined behavior and leak checks
+        if: matrix.cc == 'clang'
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+        run: |
+          make clean
+          make test CC=clang CFLAGS="-std=c11 -O1 -g -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -fsanitize=address,undefined -fno-omit-frame-pointer"
